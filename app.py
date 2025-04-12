@@ -33,6 +33,8 @@ if "frames_sent" not in st.session_state:
     st.session_state.frames_sent = 0
 if "frames_responded" not in st.session_state:
     st.session_state.frames_responded = 0
+if "last_frame_time" not in st.session_state:
+    st.session_state.last_frame_time = 0
 
 # Streamlit page configuration
 st.set_page_config(page_title="Pothole Detection App", layout="wide")
@@ -76,8 +78,7 @@ api_url = st.text_input("Server API URL", "https://1fd0-2402-3a80-4273-e6c3-f0df
 # API connection check
 def check_api_connection():
     try:
-        # Create a small dummy image for testing
-        dummy_img = np.zeros((320, 320, 3), dtype=np.uint8)  # Black 320x320 image
+        dummy_img = np.zeros((320, 320, 3), dtype=np.uint8)
         success, img_encoded = cv2.imencode('.jpg', dummy_img)
         if not success:
             st.session_state.api_status = "failed"
@@ -107,6 +108,9 @@ if st.session_state.api_status == "connected":
 elif st.session_state.api_status == "failed":
     st.error("API Status: Not Connected")
 
+# Placeholder for frame status
+frame_status = st.empty()
+
 # Display frame transmission stats
 st.metric(label="Frames Sent to API", value=st.session_state.frames_sent)
 st.metric(label="Frames Responded by API", value=st.session_state.frames_responded)
@@ -129,46 +133,65 @@ if st.button("Generate PDF"):
             if y < 50:
                 c.showPage()
                 y = 750
-            os.remove(img_path)  # Clean up temporary image
+            os.remove(img_path)
         c.save()
         with open(pdf_file, "rb") as f:
             st.download_button("Download PDF", f, file_name=pdf_file)
-        os.remove(pdf_file)  # Clean up PDF file
+        os.remove(pdf_file)
     else:
         st.warning("No pothole detections available for PDF.")
 
 # Function to process frames
 def process_frame(frame):
     st.session_state.frame_count += 1
+    logger.info(f"Processing frame {st.session_state.frame_count}")
+    
+    # Check frame validity
+    if frame is None or frame.size == 0:
+        logger.error("Invalid frame received")
+        frame_status.warning(f"Frame {st.session_state.frame_count}: Invalid frame")
+        return frame
+    
     img_resized = cv2.resize(frame, (320, 320))
     success, img_encoded = cv2.imencode('.jpg', img_resized)
     if not success:
         logger.error("Failed to encode frame to JPG")
+        frame_status.error(f"Frame {st.session_state.frame_count}: Failed to encode")
         return frame
     
     img_bytes = img_encoded.tobytes()
+    
+    # Rate limit: send every 0.5 seconds
+    current_time = time.time()
+    if current_time - st.session_state.last_frame_time < 0.5:
+        return frame
     
     # Send frame to server
     try:
         st.session_state.frames_sent += 1
         logger.info(f"Sending frame {st.session_state.frames_sent} to API")
+        frame_status.info(f"Frame {st.session_state.frames_sent}: Sending to API")
         files = {"file": ("image.jpg", img_bytes, "image/jpeg")}
         data = {"latitude": st.session_state.latitude, "longitude": st.session_state.longitude}
-        response = requests.post(f"{api_url}/process_frame/", files=files, data=data, timeout=10)
+        response = requests.post(f"{api_url}/process_frame/", files=files, data=data, timeout=15)
+        st.session_state.last_frame_time = current_time
+        
         if response.status_code == 200:
             st.session_state.frames_responded += 1
             logger.info(f"Received response for frame {st.session_state.frames_responded}")
+            frame_status.success(f"Frame {st.session_state.frames_responded}: Processed by API")
             data = response.json()
             st.session_state.detections = data.get("detections", [])
         else:
             logger.warning(f"API returned status {response.status_code} for frame {st.session_state.frames_sent}")
+            frame_status.error(f"Frame {st.session_state.frames_sent}: API returned status {response.status_code}")
         
         # Draw detections
         scale_x = frame.shape[1] / 320
         scale_y = frame.shape[0] / 320
         potholes_detected = False
         for det in st.session_state.detections:
-            if det["confidence"] > 0.5:  # Confidence threshold
+            if det["confidence"] > 0.5:
                 potholes_detected = True
                 x1, y1 = int(det["x_min"] * scale_x), int(det["y_min"] * scale_y)
                 x2, y2 = int(det["x_max"] * scale_x), int(det["y_max"] * scale_y)
@@ -176,28 +199,29 @@ def process_frame(frame):
                 label = f"{det['class_name']} {det['confidence']:.2f}"
                 cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         
-        # Store frame and detections only if potholes are detected
         if potholes_detected:
             st.session_state.processed_frames.append((frame.copy(), st.session_state.detections.copy()))
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout for frame {st.session_state.frames_sent}")
+        frame_status.error(f"Frame {st.session_state.frames_sent}: API timeout")
+    except requests.exceptions.ConnectionError:
+        logger.error(f"Connection error for frame {st.session_state.frames_sent}")
+        frame_status.error(f"Frame {st.session_state.frames_sent}: API connection failed")
     except Exception as e:
         logger.error(f"Request failed for frame {st.session_state.frames_sent}: {str(e)}")
-        st.error(f"Request failed: {e}")
+        frame_status.error(f"Frame {st.session_state.frames_sent}: Failed ({str(e)})")
     
     return frame
 
 # WebRTC streamer for live video
 def video_frame_callback(frame):
     try:
-        # Convert WebRTC frame to OpenCV format
         img = frame.to_ndarray(format="bgr24")
-        
-        # Process the frame
         processed_img = process_frame(img)
-        
-        # Convert back to WebRTC frame
         return av.VideoFrame.from_ndarray(processed_img, format="bgr24")
     except Exception as e:
         st.session_state.webrtc_error = True
+        logger.error(f"WebRTC error: {str(e)}")
         st.error(f"WebRTC processing error: {str(e)}")
         return frame
 
@@ -227,13 +251,14 @@ with st.container():
         )
     except Exception as e:
         st.session_state.webrtc_error = True
+        logger.error(f"WebRTC init error: {str(e)}")
         st.error(f"Failed to initialize WebRTC stream: {str(e)}")
 
 # Processed frames section
 if webrtc_ctx and webrtc_ctx.state.playing and not st.session_state.webrtc_error:
     with st.container():
         st.markdown('<div class="processed-box"><h3>Processed Frames with Potholes</h3></div>', unsafe_allow_html=True)
-        processed_container = st.empty()  # Placeholder for processed frames
+        processed_container = st.empty()
         
         while webrtc_ctx.state.playing:
             if st.session_state.processed_frames:
@@ -244,7 +269,7 @@ if webrtc_ctx and webrtc_ctx.state.playing and not st.session_state.webrtc_error
                     caption=f"Processed Frame {len(st.session_state.processed_frames)}: {len(recent_detections)} potholes detected",
                     width=300
                 )
-            time.sleep(0.1)  # Update display periodically
+            time.sleep(0.1)
 elif st.session_state.webrtc_error:
     st.warning("WebRTC stream failed. Please refresh the page or check your network and camera settings.")
 else:
