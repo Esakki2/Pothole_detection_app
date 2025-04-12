@@ -73,7 +73,7 @@ st.title("Pothole Detection App")
 st.write("Stream live video from your webcam to detect potholes in real-time.")
 
 # Input for server API URL
-api_url = st.text_input("Server API URL", "https://1fd0-2402-3a80-4273-e6c3-f0df-5dc6-4ca5-5b58.ngrok-free.app")
+api_url = st.text_input("Server API URL", "https://1077-2402-3a80-54b-55a6-ac0f-c66d-7b7e-fca4.ngrok-free.app")
 
 # API connection check
 def check_api_connection():
@@ -139,12 +139,12 @@ if st.button("Generate PDF"):
             st.download_button("Download PDF", f, file_name=pdf_file)
         os.remove(pdf_file)
     else:
-        st.warning("No pothole detections available for PDF.")
+        st.warning("No pothole detections available for PDF. Try capturing frames with potholes.")
 
 # Function to process frames
 def process_frame(frame):
     st.session_state.frame_count += 1
-    logger.info(f"Processing frame {st.session_state.frame_count}")
+    logger.info(f"Processing frame {st.session_state.frame_count}, shape={frame.shape}")
     
     # Check frame validity
     if frame is None or frame.size == 0:
@@ -179,9 +179,12 @@ def process_frame(frame):
         if response.status_code == 200:
             st.session_state.frames_responded += 1
             logger.info(f"Received response for frame {st.session_state.frames_responded}")
-            frame_status.success(f"Frame {st.session_state.frames_responded}: Processed by API")
             data = response.json()
             st.session_state.detections = data.get("detections", [])
+            if st.session_state.detections:
+                frame_status.success(f"Frame {st.session_state.frames_responded}: {len(st.session_state.detections)} potholes detected")
+            else:
+                frame_status.info(f"Frame {st.session_state.frames_responded}: Processed, no potholes detected")
         else:
             logger.warning(f"API returned status {response.status_code} for frame {st.session_state.frames_sent}")
             frame_status.error(f"Frame {st.session_state.frames_sent}: API returned status {response.status_code}")
@@ -191,7 +194,7 @@ def process_frame(frame):
         scale_y = frame.shape[0] / 320
         potholes_detected = False
         for det in st.session_state.detections:
-            if det["confidence"] > 0.5:
+            if det["confidence"] > 0.3:  # Lowered threshold for testing
                 potholes_detected = True
                 x1, y1 = int(det["x_min"] * scale_x), int(det["y_min"] * scale_y)
                 x2, y2 = int(det["x_max"] * scale_x), int(det["y_max"] * scale_y)
