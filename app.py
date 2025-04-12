@@ -8,6 +8,11 @@ from reportlab.pdfgen import canvas
 import os
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 import av
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Initialize session state variables
 if "frame_count" not in st.session_state:
@@ -24,6 +29,10 @@ if "webrtc_error" not in st.session_state:
     st.session_state.webrtc_error = False
 if "api_status" not in st.session_state:
     st.session_state.api_status = None  # None, "connected", or "failed"
+if "frames_sent" not in st.session_state:
+    st.session_state.frames_sent = 0
+if "frames_responded" not in st.session_state:
+    st.session_state.frames_responded = 0
 
 # Streamlit page configuration
 st.set_page_config(page_title="Pothole Detection App", layout="wide")
@@ -92,11 +101,15 @@ def check_api_connection():
 if st.button("Check API Connection"):
     check_api_connection()
 
-# Display API status (persistent)
+# Display API status
 if st.session_state.api_status == "connected":
     st.success("API Status: Connected")
 elif st.session_state.api_status == "failed":
     st.error("API Status: Not Connected")
+
+# Display frame transmission stats
+st.metric(label="Frames Sent to API", value=st.session_state.frames_sent)
+st.metric(label="Frames Responded by API", value=st.session_state.frames_responded)
 
 # Button for PDF generation
 if st.button("Generate PDF"):
@@ -130,18 +143,25 @@ def process_frame(frame):
     img_resized = cv2.resize(frame, (320, 320))
     success, img_encoded = cv2.imencode('.jpg', img_resized)
     if not success:
+        logger.error("Failed to encode frame to JPG")
         return frame
     
     img_bytes = img_encoded.tobytes()
     
     # Send frame to server
     try:
+        st.session_state.frames_sent += 1
+        logger.info(f"Sending frame {st.session_state.frames_sent} to API")
         files = {"file": ("image.jpg", img_bytes, "image/jpeg")}
         data = {"latitude": st.session_state.latitude, "longitude": st.session_state.longitude}
         response = requests.post(f"{api_url}/process_frame/", files=files, data=data, timeout=10)
         if response.status_code == 200:
+            st.session_state.frames_responded += 1
+            logger.info(f"Received response for frame {st.session_state.frames_responded}")
             data = response.json()
             st.session_state.detections = data.get("detections", [])
+        else:
+            logger.warning(f"API returned status {response.status_code} for frame {st.session_state.frames_sent}")
         
         # Draw detections
         scale_x = frame.shape[1] / 320
@@ -160,6 +180,7 @@ def process_frame(frame):
         if potholes_detected:
             st.session_state.processed_frames.append((frame.copy(), st.session_state.detections.copy()))
     except Exception as e:
+        logger.error(f"Request failed for frame {st.session_state.frames_sent}: {str(e)}")
         st.error(f"Request failed: {e}")
     
     return frame
