@@ -26,8 +26,38 @@ if "webrtc_error" not in st.session_state:
 # Streamlit page configuration
 st.set_page_config(page_title="Pothole Detection App", layout="wide")
 
+# Custom CSS for styling the live video box
+st.markdown(
+    """
+    <style>
+    .video-box {
+        border: 2px solid #4CAF50;
+        border-radius: 10px;
+        padding: 10px;
+        background-color: #f9f9f9;
+        margin-bottom: 20px;
+    }
+    .video-box h3 {
+        color: #4CAF50;
+        margin-bottom: 10px;
+    }
+    .processed-box {
+        border: 2px solid #2196F3;
+        border-radius: 10px;
+        padding: 10px;
+        background-color: #f0f8ff;
+    }
+    .processed-box h3 {
+        color: #2196F3;
+        margin-bottom: 10px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
 st.title("Pothole Detection App")
-st.write("Stream live video from your webcam to detect potholes using your browser's camera.")
+st.write("Stream live video from your webcam to detect potholes in real-time.")
 
 # Input for server API URL
 api_url = st.text_input("Server API URL", "https://1fd0-2402-3a80-4273-e6c3-f0df-5dc6-4ca5-5b58.ngrok-free.app")
@@ -114,7 +144,7 @@ def video_frame_callback(frame):
         st.error(f"WebRTC processing error: {str(e)}")
         return frame
 
-# WebRTC configuration with multiple STUN servers for reliability
+# WebRTC configuration
 rtc_config = RTCConfiguration(
     {
         "iceServers": [
@@ -125,39 +155,43 @@ rtc_config = RTCConfiguration(
     }
 )
 
-# Initialize WebRTC streamer
-try:
-    webrtc_ctx = webrtc_streamer(
-        key="pothole-detection",
-        mode=WebRtcMode.SENDRECV,
-        video_frame_callback=video_frame_callback,
-        rtc_configuration=rtc_config,
-        media_stream_constraints={"video": True, "audio": False},
-        async_processing=True,
-    )
-except Exception as e:
-    st.session_state.webrtc_error = True
-    st.error(f"Failed to initialize WebRTC stream: {str(e)}")
+# Live video section
+with st.container():
+    st.markdown('<div class="video-box"><h3>Live Video Stream</h3></div>', unsafe_allow_html=True)
+    try:
+        webrtc_ctx = webrtc_streamer(
+            key="pothole-detection",
+            mode=WebRtcMode.SENDRECV,
+            video_frame_callback=video_frame_callback,
+            rtc_configuration=rtc_config,
+            media_stream_constraints={"video": True, "audio": False},
+            async_processing=True,
+            video_html_attrs={"style": "width: 100%; max-width: 800px; border: 2px solid #4CAF50; border-radius: 5px;"}
+        )
+    except Exception as e:
+        st.session_state.webrtc_error = True
+        st.error(f"Failed to initialize WebRTC stream: {str(e)}")
 
-# Display processed frames with potholes
+# Processed frames section
 if webrtc_ctx and webrtc_ctx.state.playing and not st.session_state.webrtc_error:
-    st.subheader("Processed Frames with Potholes")
-    processed_container = st.empty()  # Placeholder for processed frames
-    
-    while webrtc_ctx.state.playing:
-        if st.session_state.processed_frames:
-            recent_frame, recent_detections = st.session_state.processed_frames[-1]
-            processed_container.image(
-                recent_frame,
-                channels="BGR",
-                caption=f"Processed Frame {len(st.session_state.processed_frames)}: {len(recent_detections)} potholes detected",
-                width=300
-            )
-        time.sleep(0.1)  # Update display periodically
+    with st.container():
+        st.markdown('<div class="processed-box"><h3>Processed Frames with Potholes</h3></div>', unsafe_allow_html=True)
+        processed_container = st.empty()  # Placeholder for processed frames
+        
+        while webrtc_ctx.state.playing:
+            if st.session_state.processed_frames:
+                recent_frame, recent_detections = st.session_state.processed_frames[-1]
+                processed_container.image(
+                    recent_frame,
+                    channels="BGR",
+                    caption=f"Processed Frame {len(st.session_state.processed_frames)}: {len(recent_detections)} potholes detected",
+                    width=300
+                )
+            time.sleep(0.1)  # Update display periodically
 elif st.session_state.webrtc_error:
-    st.warning("WebRTC stream failed. Please try refreshing the page or check your network and camera settings.")
+    st.warning("WebRTC stream failed. Please refresh the page or check your network and camera settings.")
 else:
-    st.info("Click 'Start' above to begin webcam streaming. Ensure your browser has camera access.")
+    st.info("Click 'Start' in the Live Video Stream box to begin. Ensure your browser has camera access.")
 
 # Footer
 st.markdown("---")
