@@ -154,7 +154,7 @@ with col3:
         else:
             st.warning("No pothole detections available for PDF. Try capturing frames with potholes.")
 
-# Function to process frames
+# Function to process frames (identical to OpenCV version)
 def process_frame(frame):
     st.session_state.frame_count += 1
     logger.info(f"Processing frame {st.session_state.frame_count}, shape={frame.shape}")
@@ -186,7 +186,7 @@ def process_frame(frame):
         frame_status.info(f"Frame {st.session_state.frames_sent}: Sending to API")
         files = {"file": ("image.jpg", img_bytes, "image/jpeg")}
         data = {"latitude": st.session_state.latitude, "longitude": st.session_state.longitude}
-        response = requests.post(f"{api_url}/process_frame/", files=files, data=data, timeout=15)
+        response = requests.post(f"{api_url}/process_frame/", files=files, data=data, timeout=10)
         st.session_state.last_frame_time = current_time
         
         if response.status_code == 200:
@@ -274,7 +274,7 @@ if st.session_state.streaming:
         )
         
         # Update display while streaming
-        while webrtc_ctx and webrtc_ctx.state.playing and st.session_state.streaming:
+        while webrtc_ctx and webrtc_ctx.state.playing and st.session_state.streaming and not st.session_state.webrtc_error:
             if st.session_state.latest_frame is not None:
                 video_container.image(
                     st.session_state.latest_frame,
