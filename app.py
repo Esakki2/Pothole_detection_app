@@ -15,6 +15,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize session state variables
+if "streaming" not in st.session_state:
+    st.session_state.streaming = False
 if "frame_count" not in st.session_state:
     st.session_state.frame_count = 0
 if "detections" not in st.session_state:
@@ -35,6 +37,8 @@ if "frames_responded" not in st.session_state:
     st.session_state.frames_responded = 0
 if "last_frame_time" not in st.session_state:
     st.session_state.last_frame_time = 0
+if "latest_frame" not in st.session_state:
+    st.session_state.latest_frame = None
 
 # Streamlit page configuration
 st.set_page_config(page_title="Pothole Detection App", layout="wide")
@@ -115,31 +119,40 @@ frame_status = st.empty()
 st.metric(label="Frames Sent to API", value=st.session_state.frames_sent)
 st.metric(label="Frames Responded by API", value=st.session_state.frames_responded)
 
-# Button for PDF generation
-if st.button("Generate PDF"):
-    if st.session_state.processed_frames:
-        pdf_file = "pothole_detection_report.pdf"
-        c = canvas.Canvas(pdf_file, pagesize=letter)
-        c.setFont("Helvetica", 12)
-        c.drawString(100, 750, "Pothole Detection Report")
-        c.drawString(100, 730, f"Date: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        y = 700
-        for i, (frame, detections) in enumerate(st.session_state.processed_frames):
-            img_path = f"frame_{i}.jpg"
-            cv2.imwrite(img_path, frame)
-            c.drawString(100, y, f"Frame {i+1}: {len(detections)} potholes detected")
-            c.drawImage(img_path, 100, y-150, width=400, height=300)
-            y -= 170
-            if y < 50:
-                c.showPage()
-                y = 750
-            os.remove(img_path)
-        c.save()
-        with open(pdf_file, "rb") as f:
-            st.download_button("Download PDF", f, file_name=pdf_file)
-        os.remove(pdf_file)
-    else:
-        st.warning("No pothole detections available for PDF. Try capturing frames with potholes.")
+# Buttons for streaming and PDF generation
+col1, col2, col3 = st.columns(3)
+with col1:
+    if st.button("Start Video Stream"):
+        st.session_state.streaming = True
+        st.session_state.webrtc_error = False
+with col2:
+    if st.button("Stop Video Stream"):
+        st.session_state.streaming = False
+with col3:
+    if st.button("Generate PDF"):
+        if st.session_state.processed_frames:
+            pdf_file = "pothole_detection_report.pdf"
+            c = canvas.Canvas(pdf_file, pagesize=letter)
+            c.setFont("Helvetica", 12)
+            c.drawString(100, 750, "Pothole Detection Report")
+            c.drawString(100, 730, f"Date: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            y = 700
+            for i, (frame, detections) in enumerate(st.session_state.processed_frames):
+                img_path = f"frame_{i}.jpg"
+                cv2.imwrite(img_path, frame)
+                c.drawString(100, y, f"Frame {i+1}: {len(detections)} potholes detected")
+                c.drawImage(img_path, 100, y-150, width=400, height=300)
+                y -= 170
+                if y < 50:
+                    c.showPage()
+                    y = 750
+                os.remove(img_path)
+            c.save()
+            with open(pdf_file, "rb") as f:
+                st.download_button("Download PDF", f, file_name=pdf_file)
+            os.remove(pdf_file)
+        else:
+            st.warning("No pothole detections available for PDF. Try capturing frames with potholes.")
 
 # Function to process frames
 def process_frame(frame):
@@ -221,6 +234,7 @@ def video_frame_callback(frame):
     try:
         img = frame.to_ndarray(format="bgr24")
         processed_img = process_frame(img)
+        st.session_state.latest_frame = processed_img  # Store for display
         return av.VideoFrame.from_ndarray(processed_img, format="bgr24")
     except Exception as e:
         st.session_state.webrtc_error = True
@@ -239,31 +253,36 @@ rtc_config = RTCConfiguration(
     }
 )
 
-# Live video section
-with st.container():
-    st.markdown('<div class="video-box"><h3>Live Video Stream</h3></div>', unsafe_allow_html=True)
+# Video container and processed frames display
+if st.session_state.streaming:
+    with st.container():
+        st.markdown('<div class="video-box"><h3>Live Video Stream</h3></div>', unsafe_allow_html=True)
+        video_container = st.empty()  # Placeholder for live video
+    
+    with st.container():
+        st.markdown('<div class="processed-box"><h3>Processed Frames with Potholes</h3></div>', unsafe_allow_html=True)
+        processed_container = st.empty()  # Placeholder for processed frames
+    
     try:
         webrtc_ctx = webrtc_streamer(
-            key="pothole-detection",
+            key=f"pothole-detection-{int(time.time())}",  # Unique key to reset stream
             mode=WebRtcMode.SENDRECV,
             video_frame_callback=video_frame_callback,
             rtc_configuration=rtc_config,
             media_stream_constraints={"video": True, "audio": False},
             async_processing=True,
-            video_html_attrs={"style": "width: 100%; max-width: 800px; border: 2px solid #4CAF50; border-radius: 5px;"}
         )
-    except Exception as e:
-        st.session_state.webrtc_error = True
-        logger.error(f"WebRTC init error: {str(e)}")
-        st.error(f"Failed to initialize WebRTC stream: {str(e)}")
-
-# Processed frames section
-if webrtc_ctx and webrtc_ctx.state.playing and not st.session_state.webrtc_error:
-    with st.container():
-        st.markdown('<div class="processed-box"><h3>Processed Frames with Potholes</h3></div>', unsafe_allow_html=True)
-        processed_container = st.empty()
         
-        while webrtc_ctx.state.playing:
+        # Update display while streaming
+        while webrtc_ctx and webrtc_ctx.state.playing and st.session_state.streaming:
+            if st.session_state.latest_frame is not None:
+                video_container.image(
+                    st.session_state.latest_frame,
+                    channels="BGR",
+                    caption=f"Frame {st.session_state.frame_count}",
+                    use_column_width=True
+                )
+            
             if st.session_state.processed_frames:
                 recent_frame, recent_detections = st.session_state.processed_frames[-1]
                 processed_container.image(
@@ -272,11 +291,18 @@ if webrtc_ctx and webrtc_ctx.state.playing and not st.session_state.webrtc_error
                     caption=f"Processed Frame {len(st.session_state.processed_frames)}: {len(recent_detections)} potholes detected",
                     width=300
                 )
-            time.sleep(0.1)
+            
+            time.sleep(0.1)  # Control display frame rate
+    
+    except Exception as e:
+        st.session_state.webrtc_error = True
+        logger.error(f"WebRTC init error: {str(e)}")
+        st.error(f"Failed to initialize WebRTC stream: {str(e)}")
+
 elif st.session_state.webrtc_error:
     st.warning("WebRTC stream failed. Please refresh the page or check your network and camera settings.")
 else:
-    st.info("Click 'Start' in the Live Video Stream box to begin. Ensure your browser has camera access.")
+    st.info("Click 'Start Video Stream' to begin. Ensure your browser has camera access.")
 
 # Footer
 st.markdown("---")
