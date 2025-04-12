@@ -4,148 +4,212 @@ import av
 import cv2
 import numpy as np
 import requests
-import time
+from datetime import datetime
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 import os
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
-# Initialize session state
-if "processed_frames" not in st.session_state:
-    st.session_state.processed_frames: List[Tuple[np.ndarray, list]] = []  # (frame, detections)
-if "api_url" not in st.session_state:
-    st.session_state.api_url = "https://1fd0-2402-3a80-4273-e6c3-f0df-5dc6-4ca5-5b58.ngrok-free.app"
-
-# WebRTC configuration (STUN server for NAT traversal)
-RTC_CONFIGURATION = RTCConfiguration(
+# Configuration
+RTC_CONFIG = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
+DEFAULT_API_URL = "http://localhost:8000"  # Update with your deployed URL
 
-class PotholeVideoProcessor(VideoProcessorBase):
+# Session State
+if "api_url" not in st.session_state:
+    st.session_state.api_url = DEFAULT_API_URL
+if "processed_frames" not in st.session_state:
+    st.session_state.processed_frames: List[dict] = []
+if "location" not in st.session_state:
+    st.session_state.location = {"latitude": 0.0, "longitude": 0.0}
+
+class PotholeDetector(VideoProcessorBase):
     def __init__(self):
-        self.detections = []
+        self.capture_active = False
         self.frame_count = 0
-        self.should_capture = False
     
     def process_frame(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
         self.frame_count += 1
         
-        # Process frame only if capture is enabled
-        if self.should_capture:
-            processed_img, detections = self._process_image(img)
-            if detections:  # Only store frames with detections
-                st.session_state.processed_frames.append((processed_img.copy(), detections.copy()))
+        if self.capture_active:
+            processed_img, result = process_image_with_api(
+                img, 
+                st.session_state.api_url,
+                st.session_state.location
+            )
+            
+            if result and result.get("detections"):
+                st.session_state.processed_frames.append({
+                    "image": processed_img,
+                    "detections": result["detections"],
+                    "location": result["location"],
+                    "timestamp": result["timestamp"]
+                })
+                
             return av.VideoFrame.from_ndarray(processed_img, format="bgr24")
+        
         return frame
-    
-    def _process_image(self, img: np.ndarray) -> Tuple[np.ndarray, list]:
-        """Send image to API and process detections"""
-        img_resized = cv2.resize(img, (320, 320))
+
+def process_image_with_api(img: np.ndarray, api_url: str, location: dict) -> Tuple[np.ndarray, Optional[dict]]:
+    """Send image to API for processing"""
+    try:
+        # Resize and encode image
+        img_resized = cv2.resize(img, (640, 640))
         _, img_encoded = cv2.imencode('.jpg', img_resized)
         img_bytes = img_encoded.tobytes()
         
-        detections = []
-        try:
-            files = {"file": ("image.jpg", img_bytes, "image/jpeg")}
-            response = requests.post(
-                f"{st.session_state.api_url}/process_frame/",
-                files=files,
-                data={"latitude": None, "longitude": None},
-                timeout=5
-            )
-            if response.status_code == 200:
-                detections = response.json().get("detections", [])
-        except Exception as e:
-            print(f"API Error: {e}")
+        # Prepare request
+        files = {"file": ("image.jpg", img_bytes, "image/jpeg")}
+        response = requests.post(
+            f"{api_url}/process_frame/",
+            files=files,
+            data=location,
+            timeout=10
+        )
         
-        # Draw detections
-        scale_x = img.shape[1] / 320
-        scale_y = img.shape[0] / 320
-        for det in detections:
-            if det["confidence"] > 0.5:
+        if response.status_code == 200:
+            result = response.json()
+            detections = result.get("detections", [])
+            
+            # Draw detections
+            scale_x = img.shape[1] / 640
+            scale_y = img.shape[0] / 640
+            for det in detections:
                 x1 = int(det["x_min"] * scale_x)
                 y1 = int(det["y_min"] * scale_y)
                 x2 = int(det["x_max"] * scale_x)
                 y2 = int(det["y_max"] * scale_y)
+                
                 cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 label = f"{det['class_name']} {det['confidence']:.2f}"
-                cv2.putText(img, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
-        
-        return img, detections
+                cv2.putText(img, label, (x1, y1-10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+            
+            return img, result
+            
+    except Exception as e:
+        st.error(f"API Error: {e}")
+    
+    return img, None
 
-def generate_pdf():
-    """Generate PDF from processed frames"""
+def generate_pdf_report():
+    """Generate PDF report from detected potholes"""
     if not st.session_state.processed_frames:
-        st.warning("No pothole detections available for PDF.")
         return None
     
-    pdf_file = "pothole_detection_report.pdf"
-    c = canvas.Canvas(pdf_file, pagesize=letter)
-    c.setFont("Helvetica", 12)
-    c.drawString(100, 750, "Pothole Detection Report")
-    c.drawString(100, 730, f"Date: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    pdf_path = "pothole_report.pdf"
+    c = canvas.Canvas(pdf_path, pagesize=letter)
     
-    y = 700
-    for i, (frame, detections) in enumerate(st.session_state.processed_frames):
-        img_path = f"frame_{i}.jpg"
-        cv2.imwrite(img_path, frame)
-        c.drawString(100, y, f"Frame {i+1}: {len(detections)} potholes detected")
-        c.drawImage(img_path, 100, y-150, width=400, height=300)
-        y -= 170
-        if y < 50:  # New page if we run out of space
+    # PDF Header
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(100, 750, "Pothole Detection Report")
+    c.setFont("Helvetica", 12)
+    c.drawString(100, 730, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    y_position = 700
+    for idx, detection in enumerate(st.session_state.processed_frames):
+        # Save frame as temp image
+        img_path = f"temp_{idx}.jpg"
+        cv2.imwrite(img_path, detection["image"])
+        
+        # Add to PDF
+        c.drawString(100, y_position, f"Detection #{idx+1}")
+        c.drawString(100, y_position-20, f"Location: {detection['location']}")
+        c.drawString(100, y_position-40, f"Time: {detection['timestamp']}")
+        c.drawString(100, y_position-60, f"Potholes detected: {len(detection['detections']}")
+        
+        # Add image
+        c.drawImage(img_path, 100, y_position-300, width=400, height=300)
+        
+        y_position -= 350
+        if y_position < 100:
             c.showPage()
-            y = 750
+            y_position = 750
+        
         os.remove(img_path)
     
     c.save()
-    return pdf_file
+    return pdf_path
 
-# Streamlit UI
-st.title("Real-time Pothole Detection with WebRTC")
-
-# API URL configuration
-st.session_state.api_url = st.text_input(
-    "Server API URL",
-    st.session_state.api_url
-)
-
-# WebRTC Streamer
-ctx = webrtc_streamer(
-    key="pothole-detection",
-    video_processor_factory=PotholeVideoProcessor,
-    rtc_configuration=RTC_CONFIGURATION,
-    media_stream_constraints={
-        "video": True,
-        "audio": False
-    },
-)
-
-# Capture control
-if ctx.video_processor:
-    if st.button("Start/Stop Capture"):
-        ctx.video_processor.should_capture = not ctx.video_processor.should_capture
-        st.session_state.capturing = ctx.video_processor.should_capture
-
-# Display processed frames
-st.subheader("Detected Potholes")
-if st.session_state.processed_frames:
-    cols = st.columns(3)
-    for idx, (frame, detections) in enumerate(st.session_state.processed_frames[-6:]):  # Show last 6
-        with cols[idx % 3]:
-            st.image(frame, channels="BGR", caption=f"{len(detections)} potholes")
-else:
-    st.info("No potholes detected yet")
-
-# PDF Generation
-if st.button("Generate PDF Report"):
-    pdf_file = generate_pdf()
-    if pdf_file:
-        with open(pdf_file, "rb") as f:
-            st.download_button(
-                "Download PDF",
-                f,
-                file_name=pdf_file,
-                mime="application/pdf"
+def main():
+    st.title("🚧 Real-Time Pothole Detection System")
+    
+    # Settings Sidebar
+    with st.sidebar:
+        st.header("Settings")
+        st.session_state.api_url = st.text_input(
+            "API Server URL", 
+            st.session_state.api_url
+        )
+        
+        st.header("Location")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.session_state.location["latitude"] = st.number_input(
+                "Latitude", 
+                value=st.session_state.location["latitude"],
+                format="%.6f"
             )
-        os.remove(pdf_file)
+        with col2:
+            st.session_state.location["longitude"] = st.number_input(
+                "Longitude", 
+                value=st.session_state.location["longitude"],
+                format="%.6f"
+            )
+        
+        if st.button("Use Current Location (Browser)"):
+            st.warning("Enable location access in your browser settings")
+    
+    # WebRTC Streamer
+    ctx = webrtc_streamer(
+        key="pothole-detection",
+        video_processor_factory=PotholeDetector,
+        rtc_configuration=RTC_CONFIG,
+        media_stream_constraints={
+            "video": {"width": 640, "height": 480},
+            "audio": False
+        },
+        async_processing=True,
+    )
+    
+    # Capture Control
+    if ctx.video_processor:
+        if st.button("Toggle Capture Mode"):
+            ctx.video_processor.capture_active = not ctx.video_processor.capture_active
+            status = "ON" if ctx.video_processor.capture_active else "OFF"
+            st.success(f"Capture mode {status}")
+    
+    # Detection Display
+    st.header("Detected Potholes")
+    if st.session_state.processed_frames:
+        cols = st.columns(2)
+        for idx, detection in enumerate(st.session_state.processed_frames[-4:]):
+            with cols[idx % 2]:
+                st.image(
+                    detection["image"], 
+                    channels="BGR",
+                    caption=f"{len(detection['detections'])} potholes at {detection['location']}"
+                )
+    else:
+        st.info("No potholes detected yet. Enable capture mode to start detection.")
+    
+    # Report Generation
+    st.header("Report Generation")
+    if st.button("Generate PDF Report"):
+        report_path = generate_pdf_report()
+        if report_path:
+            with open(report_path, "rb") as f:
+                st.download_button(
+                    "Download Report",
+                    f,
+                    file_name="pothole_detection_report.pdf",
+                    mime="application/pdf"
+                )
+            os.remove(report_path)
+        else:
+            st.warning("No detections available for report")
+
+if __name__ == "__main__":
+    main()
