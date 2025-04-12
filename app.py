@@ -22,11 +22,13 @@ if "processed_frames" not in st.session_state:
     st.session_state.processed_frames = []  # Store only frames with potholes
 if "webrtc_error" not in st.session_state:
     st.session_state.webrtc_error = False
+if "api_status" not in st.session_state:
+    st.session_state.api_status = None  # None, "connected", or "failed"
 
 # Streamlit page configuration
 st.set_page_config(page_title="Pothole Detection App", layout="wide")
 
-# Custom CSS for styling the live video box
+# Custom CSS for styling
 st.markdown(
     """
     <style>
@@ -61,6 +63,40 @@ st.write("Stream live video from your webcam to detect potholes in real-time.")
 
 # Input for server API URL
 api_url = st.text_input("Server API URL", "https://1fd0-2402-3a80-4273-e6c3-f0df-5dc6-4ca5-5b58.ngrok-free.app")
+
+# API connection check
+def check_api_connection():
+    try:
+        # Create a small dummy image for testing
+        dummy_img = np.zeros((320, 320, 3), dtype=np.uint8)  # Black 320x320 image
+        success, img_encoded = cv2.imencode('.jpg', dummy_img)
+        if not success:
+            st.session_state.api_status = "failed"
+            st.error("Failed to encode test image.")
+            return
+        
+        img_bytes = img_encoded.tobytes()
+        files = {"file": ("test.jpg", img_bytes, "image/jpeg")}
+        response = requests.post(f"{api_url}/process_frame/", files=files, timeout=5)
+        
+        if response.status_code == 200:
+            st.session_state.api_status = "connected"
+            st.success("API is connected and responsive!")
+        else:
+            st.session_state.api_status = "failed"
+            st.error(f"API returned status {response.status_code}. Please check the URL or server.")
+    except requests.exceptions.RequestException as e:
+        st.session_state.api_status = "failed"
+        st.error(f"Failed to connect to API: {str(e)}")
+
+if st.button("Check API Connection"):
+    check_api_connection()
+
+# Display API status (persistent)
+if st.session_state.api_status == "connected":
+    st.success("API Status: Connected")
+elif st.session_state.api_status == "failed":
+    st.error("API Status: Not Connected")
 
 # Button for PDF generation
 if st.button("Generate PDF"):
