@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 import requests
 import time
-from reportlab.lib.pagesizes import import letter
+from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 import os
 import tempfile
